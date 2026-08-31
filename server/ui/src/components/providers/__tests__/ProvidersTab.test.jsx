@@ -47,6 +47,23 @@ describe('ProvidersTab brokered base URL', () => {
         expect(screen.queryByTestId('provider-base-url-input')).not.toBeInTheDocument();
     });
 
+    it('does not prefill the API Key field with the stored base_url', async () => {
+        // A brokered provider's base_url is now returned by GET /api/providers
+        // for display — it must not leak into the (visually masked) API Key
+        // input's initial value, since that field represents a secret.
+        vi.resetModules();
+        _mockAppData([{
+            name: 'openai_compat', kind: 'brokered', status: 'running',
+            base_url: 'https://my-proxy.example.com/v1',
+        }]);
+        _mockFetch();
+        const { default: FreshProvidersTab } = await import('../ProvidersTab.jsx');
+        await act(async () => { render(<FreshProvidersTab />); });
+
+        const keyInput = document.querySelector('input[type="password"]');
+        expect(keyInput).toHaveValue('');
+    });
+
     it('hides the base URL section for a brokered provider with no base_url use case', async () => {
         vi.resetModules();
         _mockAppData([{ name: 'anthropic', kind: 'brokered', status: 'running', base_url: null }]);

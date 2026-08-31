@@ -252,15 +252,19 @@ function DetailPane({ provider, status, modelCount, onSaved, onTested, onRemove 
     // case that ever changes.
     const showBrokeredUrl = !isDirect && (provider.base_url != null || provider.name === 'openai_compat');
 
-    const [field, setField] = useState(provider.base_url || '');
+    // `field` is the direct-provider Base URL input OR the brokered API Key
+    // input, depending on isDirect — never prefill it from base_url for a
+    // brokered provider, or the (secret-looking) key field would silently
+    // show the non-secret URL instead of starting blank.
+    const [field, setField] = useState(isDirect ? (provider.base_url || '') : '');
     const [urlField, setUrlField] = useState(provider.base_url || '');
     const [urlEditing, setUrlEditing] = useState(false);
     // When the selected provider changes, reset the inputs.
     useEffect(() => {
-        setField(provider.base_url || '');
+        setField(isDirect ? (provider.base_url || '') : '');
         setUrlField(provider.base_url || '');
         setUrlEditing(false);
-    }, [provider.name, provider.base_url]);
+    }, [provider.name, provider.base_url, isDirect]);
 
     const [saving, setSaving] = useState(false);
     const [saveError, setSaveError] = useState(null);
