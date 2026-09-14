@@ -69,6 +69,11 @@
     display: flex;
     align-items: center;
     flex: 0 0 auto;
+    /* Without a floor, a short label (e.g. "Agents") sizes to ~80px — not
+       enough room for the ~68px hover overlay to coexist with any visible
+       label text, so hovering blanks out the name entirely. This keeps
+       enough of the icon + label legible under the overlay. */
+    min-width: 140px;
     height: var(--header-height);
     background: transparent;
     border-bottom: 2px solid transparent;
