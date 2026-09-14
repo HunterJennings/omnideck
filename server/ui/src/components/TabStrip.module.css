@@ -117,7 +117,11 @@
 
 /* Inactive tab: floats over the tab's right edge on hover instead of
    reserving space, so inactive tabs keep a constant width. The gradient
-   fades the overlay in from its left edge to read as floating chrome. */
+   fades the overlay in from its left edge to read as floating chrome.
+   pointer-events stays none on this wrapper even while visible — the
+   padding/fade area has no button in it, and on a narrow tab that dead
+   zone can cover most of the tab, blocking the "select this tab" click
+   underneath. Only the buttons themselves (below) re-enable pointer-events. */
 .tabActionsOverlay {
     position: absolute;
     right: 0;
@@ -132,6 +136,10 @@
 
 .tab:hover .tabActionsOverlay {
     opacity: 1;
+}
+
+.tab:hover .tabActionsOverlay .tabMenuButton,
+.tab:hover .tabActionsOverlay .tabClose {
     pointer-events: auto;
 }
 
