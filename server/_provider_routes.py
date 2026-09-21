@@ -217,7 +217,13 @@ async def handle_add_provider(request: web.Request) -> web.Response:
         auth_blob: dict[str, str] = {"api_key": spec.api_key}
         if spec.base_url:
             # OpenAI-compat with a key needs the upstream URL stored alongside
-            # the key so the broker knows where to forward.
+            # the key so the broker knows where to forward. Validate it the
+            # same as a direct provider's — this one reaches a real network
+            # host too, so it needs the same blocked-host guard.
+            try:
+                _validate_base_url(spec.base_url)
+            except ValueError as exc:
+                return web.json_response({"error": str(exc)}, status=400)
             auth_blob["base_url"] = spec.base_url
         try:
             await _supervisor_call("add", {
@@ -415,6 +421,11 @@ async def handle_update_provider(request: web.Request) -> web.Response:
         # A base_url the client didn't send (only the key changed) falls
         # back to the currently stored one, so it isn't silently dropped.
         new_base_url = spec.base_url or settings.get("brokered_provider_urls", {}).get(name)
+        if new_base_url:
+            try:
+                _validate_base_url(new_base_url)
+            except ValueError as exc:
+                return web.json_response({"error": str(exc)}, status=400)
         auth_blob: dict[str, str] = {"api_key": spec.api_key}
         if new_base_url:
             auth_blob["base_url"] = new_base_url

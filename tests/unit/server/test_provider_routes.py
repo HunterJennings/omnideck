@@ -200,6 +200,30 @@ class TestHandleAddProviderBrokered:
             "https://my-proxy.example.com/v1"
         )
 
+    @pytest.mark.asyncio
+    async def test_blocked_host_rejected_before_touching_the_supervisor(self):
+        store = _FakeSettingsStore()
+        supervisor_calls: list[tuple[str, dict]] = []
+
+        async def fake_supervisor_call(verb, args):
+            supervisor_calls.append((verb, args))
+            return {}
+
+        with (
+            patch("server._provider_routes.load_settings", side_effect=store.load),
+            patch("server._provider_routes.save_settings", side_effect=store.save),
+            patch("server._provider_routes._supervisor_call", side_effect=fake_supervisor_call),
+        ):
+            resp = await handle_add_provider(_request({
+                "name": "openai_compat",
+                "api_key": "sk-test",
+                "base_url": "http://169.254.169.254/latest/meta-data/",
+            }))
+
+        assert resp.status == 400
+        assert supervisor_calls == []
+        assert store.load().get("brokered_provider_urls", {}) == {}
+
 
 @pytest.mark.unit
 class TestHandleListProviders:
@@ -259,6 +283,40 @@ class TestHandleUpdateProviderBrokered:
 
         assert resp.status == 200
         assert captured_add_args["auth_blob"]["base_url"] == "https://old-proxy.example.com/v1"
+        assert store.load()["brokered_provider_urls"]["openai_compat"] == (
+            "https://old-proxy.example.com/v1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_blocked_host_rejected_without_touching_existing_integration(self):
+        store = _FakeSettingsStore({
+            "brokered_provider_urls": {"openai_compat": "https://old-proxy.example.com/v1"},
+        })
+        integ = _integration("llm_openai_compat-id", "llm_openai_compat")
+        supervisor_calls: list[tuple[str, dict]] = []
+
+        async def fake_supervisor_call(verb, args):
+            supervisor_calls.append((verb, args))
+            return {}
+
+        with (
+            patch("server._provider_routes.load_settings", side_effect=store.load),
+            patch("server._provider_routes.save_settings", side_effect=store.save),
+            patch(
+                "server._provider_routes.registered_integrations",
+                AsyncMock(return_value={"llm_openai_compat-id": integ}),
+            ),
+            patch("server._provider_routes._supervisor_call", side_effect=fake_supervisor_call),
+        ):
+            resp = await handle_update_provider(
+                _request(
+                    {"api_key": "sk-new-key", "base_url": "http://metadata.google.internal/"},
+                    match={"name": "openai_compat"},
+                ),
+            )
+
+        assert resp.status == 400
+        assert supervisor_calls == []
         assert store.load()["brokered_provider_urls"]["openai_compat"] == (
             "https://old-proxy.example.com/v1"
         )
