@@ -38,6 +38,17 @@ async def custom_css_handler(_request: Request) -> StreamResponse:
     return web.FileResponse(_custom_css_path(), headers={"Cache-Control": "no-cache"})
 
 
+async def _ensure_custom_css_on_startup(_app: web.Application) -> None:
+    """Seed the default custom.css once the app actually starts.
+
+    Deferred to on_startup rather than done eagerly in register_ui_routes, so
+    constructing an app (e.g. in tests that never start it) doesn't touch the
+    state directory — matching how _run_data_migrations defers its own
+    settings.home_dir access in server/aiohttp_app.py.
+    """
+    _ensure_custom_css()
+
+
 async def index_handler(_request: Request) -> StreamResponse:
     """Serve a revalidated SPA entry point so deployments load current assets."""
     index_path = UI_DIST_DIR / "index.html"
@@ -55,7 +66,7 @@ def register_ui_routes(app: web.Application) -> None:
     """Register the SPA entry point and static asset directories."""
     app.router.add_route("GET", "/", index_handler)
     app.router.add_route("GET", "/custom.css", custom_css_handler)
-    _ensure_custom_css()
+    app.on_startup.append(_ensure_custom_css_on_startup)
     if UI_DIST_DIR.exists():
         app.router.add_static("/assets", UI_DIST_DIR / "assets", show_index=False)
     if STATIC_DIR.exists():
