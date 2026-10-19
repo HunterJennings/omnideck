@@ -234,7 +234,8 @@ test('inactive tab with menu actions renders both buttons for hover reveal, clos
     );
 
     // Inactive tab ("two") still exposes both controls in the DOM so a CSS
-    // hover overlay can reveal them without a re-render on mouse enter.
+    // hover/focus-within reveal can show them without a re-render on mouse
+    // enter.
     expect(screen.getByRole('button', { name: 'Actions for Two tab' }))
         .toBeInTheDocument();
     const closeTwo = screen.getByRole('button', { name: 'Close Two tab' });
@@ -245,7 +246,7 @@ test('inactive tab with menu actions renders both buttons for hover reveal, clos
     expect(onTabChange).not.toHaveBeenCalled();
 });
 
-test('moving the active tab moves the inline button styling with it', () => {
+test('menu and close buttons follow the active tab in the roving tabindex', () => {
     const props = {
         tabs: TABS.map((tab) => ({
             ...tab,
@@ -262,15 +263,85 @@ test('moving the active tab moves the inline button styling with it', () => {
     };
     const { rerender } = render(<TabStrip {...props} activeTab="one" />);
 
+    const actionsOne = () => screen.getByRole('button', { name: 'Actions for One tab' });
     const closeOne = () => screen.getByRole('button', { name: 'Close One tab' });
+    const actionsTwo = () => screen.getByRole('button', { name: 'Actions for Two tab' });
     const closeTwo = () => screen.getByRole('button', { name: 'Close Two tab' });
-    expect(closeOne().parentElement.className).toMatch(/tabActionsInline/);
-    expect(closeTwo().parentElement.className).toMatch(/tabActionsOverlay/);
+
+    expect(actionsOne()).toHaveAttribute('tabindex', '0');
+    expect(closeOne()).toHaveAttribute('tabindex', '0');
+    expect(actionsTwo()).toHaveAttribute('tabindex', '-1');
+    expect(closeTwo()).toHaveAttribute('tabindex', '-1');
 
     rerender(<TabStrip {...props} activeTab="two" />);
 
-    expect(closeOne().parentElement.className).toMatch(/tabActionsOverlay/);
-    expect(closeTwo().parentElement.className).toMatch(/tabActionsInline/);
+    expect(actionsOne()).toHaveAttribute('tabindex', '-1');
+    expect(closeOne()).toHaveAttribute('tabindex', '-1');
+    expect(actionsTwo()).toHaveAttribute('tabindex', '0');
+    expect(closeTwo()).toHaveAttribute('tabindex', '0');
+});
+
+test('an inactive tab stays flagged as open while its own menu is open', () => {
+    render(
+        <TabStrip
+            tabs={TABS.map((tab) => ({
+                ...tab,
+                menuActions: [{
+                    id: 'reload',
+                    label: 'Reload',
+                    icon: 'bi-arrow-clockwise',
+                    execute: vi.fn(),
+                    disabled: false,
+                }],
+            }))}
+            activeTab="one"
+            onTabChange={vi.fn()}
+            onCloseTab={vi.fn()}
+        />,
+    );
+
+    // tabMenuOpen forces the CSS hover reveal to stay on even once the
+    // pointer leaves the tab for the popup, so the "⋯" trigger doesn't
+    // disappear while aria-expanded is still true on it.
+    const tabTwo = screen.getByTestId('view-tab-two').parentElement;
+    expect(tabTwo.className).not.toMatch(/tabMenuOpen/);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for Two tab' }));
+
+    expect(tabTwo.className).toMatch(/tabMenuOpen/);
+});
+
+test('closes the tab action menu when its trigger is clicked again', () => {
+    render(
+        <TabStrip
+            tabs={[{
+                ...TABS[0],
+                menuActions: [{
+                    id: 'reload',
+                    label: 'Reload',
+                    icon: 'bi-arrow-clockwise',
+                    execute: vi.fn(),
+                    disabled: false,
+                }],
+            }]}
+            activeTab="one"
+            onTabChange={vi.fn()}
+            onCloseTab={vi.fn()}
+        />,
+    );
+
+    // mousedown-then-click, not just click, because the real bug only shows
+    // up through that sequence: the menu's outside-click listener closes on
+    // mousedown, so a plain click re-fires open right after unless the
+    // trigger's own mousedown is kept from reaching that listener.
+    const trigger = screen.getByRole('button', { name: 'Actions for One tab' });
+    fireEvent.mouseDown(trigger);
+    fireEvent.click(trigger);
+    expect(screen.getByRole('menu', { name: 'Tab actions' })).toBeInTheDocument();
+
+    fireEvent.mouseDown(trigger);
+    fireEvent.click(trigger);
+    expect(screen.queryByRole('menu', { name: 'Tab actions' })).not.toBeInTheDocument();
 });
 
 test('opens the tab context menu from the keyboard', () => {
@@ -298,4 +369,34 @@ test('opens the tab context menu from the keyboard', () => {
     });
 
     expect(screen.getByRole('menuitem', { name: 'Close tab' })).toHaveFocus();
+});
+
+test('reopening the keyboard context menu on an already-open tab keeps it open', () => {
+    render(
+        <TabStrip
+            tabs={[{
+                ...TABS[0],
+                menuActions: [{
+                    id: 'close',
+                    label: 'Close tab',
+                    icon: 'bi-x-lg',
+                    execute: vi.fn(),
+                    disabled: false,
+                }],
+            }]}
+            activeTab="one"
+            onTabChange={vi.fn()}
+            onCloseTab={vi.fn()}
+        />,
+    );
+
+    const tab = screen.getByTestId('view-tab-one');
+    fireEvent.keyDown(tab, { key: 'F10', shiftKey: true });
+    expect(screen.getByRole('menu', { name: 'Tab actions' })).toBeInTheDocument();
+
+    // Unlike the "..." trigger button, the keyboard path has no toggle: a
+    // second invocation re-opens/repositions rather than closing, since
+    // there's no pointer feedback to explain a surprise close.
+    fireEvent.keyDown(tab, { key: 'F10', shiftKey: true });
+    expect(screen.getByRole('menu', { name: 'Tab actions' })).toBeInTheDocument();
 });

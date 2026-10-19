@@ -68,12 +68,7 @@ class FilePreview:
         if tab_group_id == "floating":
             host.locator("[data-testid^='maximize-view-']").click()
         else:
-            tab_bar = self.page.get_by_test_id(
-                f"desktop-tab-group-{tab_group_id}-tab-bar"
-            )
-            tab_bar.locator(
-                "[data-testid^='view-tab-actions-']"
-            ).click()
+            self.page.get_by_test_id(f"view-tab-actions-{view_id}").click()
             self.page.locator(
                 "[data-testid^='maximize-view-']"
             ).click()
