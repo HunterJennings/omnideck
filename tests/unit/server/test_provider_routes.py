@@ -249,6 +249,54 @@ class TestHandleListProviders:
 
 
 @pytest.mark.unit
+class TestHandleUpdateProviderDirect:
+    """PATCH /api/providers/{name} — direct (no api_key) providers."""
+
+    @pytest.mark.asyncio
+    async def test_failed_probe_does_not_persist(self):
+        store = _FakeSettingsStore({
+            "direct_providers": {"ollama": {"base_url": "http://localhost:11434"}},
+        })
+        with (
+            patch("server._provider_routes.load_settings", side_effect=store.load),
+            patch("server._provider_routes.save_settings", side_effect=store.save),
+            patch(
+                "server._provider_routes.probe_direct_provider",
+                AsyncMock(side_effect=RuntimeError("connection refused")),
+            ),
+        ):
+            resp = await handle_update_provider(
+                _request({"base_url": "http://localhost:9999"}, match={"name": "ollama"}),
+            )
+
+        assert resp.status == 503
+        # The old, working URL must still be on disk — not the typo'd one.
+        assert store.load()["direct_providers"]["ollama"]["base_url"] == (
+            "http://localhost:11434"
+        )
+
+    @pytest.mark.asyncio
+    async def test_successful_probe_persists(self):
+        store = _FakeSettingsStore({
+            "direct_providers": {"ollama": {"base_url": "http://localhost:11434"}},
+        })
+        with (
+            patch("server._provider_routes.load_settings", side_effect=store.load),
+            patch("server._provider_routes.save_settings", side_effect=store.save),
+            patch("server._provider_routes.probe_direct_provider", AsyncMock(return_value=[])),
+            patch("server._provider_routes.reset_provider"),
+        ):
+            resp = await handle_update_provider(
+                _request({"base_url": "http://localhost:22222"}, match={"name": "ollama"}),
+            )
+
+        assert resp.status == 200
+        assert store.load()["direct_providers"]["ollama"]["base_url"] == (
+            "http://localhost:22222"
+        )
+
+
+@pytest.mark.unit
 class TestHandleUpdateProviderBrokered:
     @pytest.mark.asyncio
     async def test_omitted_base_url_falls_back_to_stored_value(self):
@@ -286,6 +334,45 @@ class TestHandleUpdateProviderBrokered:
         assert store.load()["brokered_provider_urls"]["openai_compat"] == (
             "https://old-proxy.example.com/v1"
         )
+
+    @pytest.mark.asyncio
+    async def test_explicit_empty_base_url_clears_the_stored_value(self):
+        """An empty string is a deliberate clear, not "field omitted"."""
+        store = _FakeSettingsStore({
+            "brokered_provider_urls": {"openai_compat": "https://old-proxy.example.com/v1"},
+        })
+        integ = _integration("llm_openai_compat-id", "llm_openai_compat")
+        captured_add_args = {}
+
+        async def fake_supervisor_call(verb, args):
+            if verb == "add":
+                captured_add_args.update(args)
+            return {}
+
+        with (
+            patch("server._provider_routes.load_settings", side_effect=store.load),
+            patch("server._provider_routes.save_settings", side_effect=store.save),
+            patch(
+                "server._provider_routes.registered_integrations",
+                AsyncMock(return_value={"llm_openai_compat-id": integ}),
+            ),
+            patch("server._provider_routes._supervisor_call", side_effect=fake_supervisor_call),
+            patch("server._provider_routes.reset_provider"),
+            patch(
+                "server._provider_routes.get_provider",
+                return_value=MagicMock(list_models=AsyncMock(return_value=[])),
+            ),
+        ):
+            resp = await handle_update_provider(
+                _request(
+                    {"api_key": "sk-new-key", "base_url": ""},
+                    match={"name": "openai_compat"},
+                ),
+            )
+
+        assert resp.status == 200
+        assert "base_url" not in captured_add_args["auth_blob"]
+        assert store.load().get("brokered_provider_urls", {}) == {}
 
     @pytest.mark.asyncio
     async def test_blocked_host_rejected_without_touching_existing_integration(self):

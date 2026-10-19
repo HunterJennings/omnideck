@@ -87,6 +87,18 @@ def _label(name: str) -> str:
     return _PROVIDER_LABELS.get(name, name)
 
 
+def _unreachable_response(name: str, exc: Exception) -> web.Response:
+    """503 payload for a failed provider probe, shared by add and update."""
+    return web.json_response(
+        {
+            "error": "provider_unreachable",
+            "message": _sanitize(str(exc)),
+            "provider": name,
+        },
+        status=503,
+    )
+
+
 def _set_brokered_url(name: str, base_url: str | None) -> None:
     """Sync the display-only base_url cache for a brokered provider."""
     settings = load_settings()
@@ -248,14 +260,7 @@ async def handle_add_provider(request: web.Request) -> web.Response:
         except Exception as exc:  # noqa: BLE001 - any failure here is "couldn't reach"
             reset_provider(name)
             await _remove_brokered_integration(name)
-            return web.json_response(
-                {
-                    "error": "provider_unreachable",
-                    "message": _sanitize(str(exc)),
-                    "provider": name,
-                },
-                status=503,
-            )
+            return _unreachable_response(name, exc)
         _set_brokered_url(name, spec.base_url)
         kind = "brokered"
         stored_base_url = spec.base_url
@@ -273,14 +278,7 @@ async def handle_add_provider(request: web.Request) -> web.Response:
         try:
             models = await probe_direct_provider(name, spec.base_url)
         except Exception as exc:  # noqa: BLE001 - any failure here is "couldn't reach"
-            return web.json_response(
-                {
-                    "error": "provider_unreachable",
-                    "message": _sanitize(str(exc)),
-                    "provider": name,
-                },
-                status=503,
-            )
+            return _unreachable_response(name, exc)
         settings = load_settings()
         direct = dict(settings.get("direct_providers") or {})
         direct[name] = {"base_url": spec.base_url}
@@ -363,12 +361,13 @@ class _UpdateProviderBody(BaseModel):
 async def handle_update_provider(request: web.Request) -> web.Response:
     """Update an existing provider's connection details.
 
-    For a direct provider, rewrites its ``settings.direct_providers``
-    entry (and validates the new URL). For a brokered one, the supervisor
-    has no auth_blob-aware update verb yet, so the change is implemented
-    as remove + add server-side — keeping the operation atomic from the
-    client's perspective. Either way the cache is dropped and a probe is
-    run; the response shape matches ``POST /api/providers``.
+    For a direct provider, probes the candidate URL first and only
+    rewrites its ``settings.direct_providers`` entry on success — the same
+    probe-before-persist shape as ``POST /api/providers``. For a brokered
+    one, the supervisor has no auth_blob-aware update verb yet, so the
+    change is implemented as remove + add server-side, probed afterward
+    (see the inline note on that branch for the gap this leaves). The
+    response shape matches ``POST /api/providers`` either way.
     """
     name = request.match_info["name"]
     if name not in _KNOWN_PROVIDERS:
@@ -389,7 +388,9 @@ async def handle_update_provider(request: web.Request) -> web.Response:
     direct = dict(settings.get("direct_providers") or {})
 
     if name in direct:
-        # Direct kind — update the base_url.
+        # Direct kind — probe the candidate URL before persisting, same
+        # probe-before-persist shape as the add path, so a typo doesn't
+        # overwrite a working entry with an unreachable one.
         if not spec.base_url:
             return web.json_response(
                 {"error": "base_url is required to update a direct provider"},
@@ -399,8 +400,13 @@ async def handle_update_provider(request: web.Request) -> web.Response:
             _validate_base_url(spec.base_url)
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=400)
+        try:
+            models = await probe_direct_provider(name, spec.base_url)
+        except Exception as exc:  # noqa: BLE001 - any failure here is "couldn't reach"
+            return _unreachable_response(name, exc)
         direct[name] = {"base_url": spec.base_url}
         save_settings({"direct_providers": direct})
+        reset_provider(name)
         kind = "direct"
         stored_base_url: str | None = spec.base_url
     else:
@@ -418,9 +424,12 @@ async def handle_update_provider(request: web.Request) -> web.Response:
                 {"error": "api_key is required to update a brokered provider"},
                 status=400,
             )
-        # A base_url the client didn't send (only the key changed) falls
-        # back to the currently stored one, so it isn't silently dropped.
-        new_base_url = spec.base_url or settings.get("brokered_provider_urls", {}).get(name)
+        if "base_url" in spec.model_fields_set:
+            # Sent explicitly — including an empty string to clear it — so
+            # honor it as-is instead of falling back to the cached value.
+            new_base_url = spec.base_url or None
+        else:
+            new_base_url = settings.get("brokered_provider_urls", {}).get(name)
         if new_base_url:
             try:
                 _validate_base_url(new_base_url)
@@ -432,6 +441,18 @@ async def handle_update_provider(request: web.Request) -> web.Response:
         # Atomic-ish: remove, then add with the new auth_blob. The supervisor
         # doesn't currently expose an auth_blob-aware update verb; revisit
         # when it does.
+        #
+        # KNOWN GAP: unlike the direct branch above (and the add path's own
+        # brokered branch), this removes the working integration before the
+        # new credentials are confirmed reachable — a typo'd key or URL here
+        # currently loses the old config instead of leaving it in place. A
+        # real fix needs either an auth_blob-aware update verb on the
+        # supervisor, or spawning a second, differently-identified broker
+        # with the new credentials, probing that one directly by its own
+        # socket (the provider cache only resolves the one canonical
+        # per-name socket path), and only removing the old integration once
+        # that probe succeeds. Flagging this for a deliberate follow-up
+        # rather than building it inline here.
         try:
             await _supervisor_call("remove", {"id": existing.id})
             await _supervisor_call("add", {
@@ -450,21 +471,13 @@ async def handle_update_provider(request: web.Request) -> web.Response:
         except SupervisorError as exc:
             return web.json_response({"error": _sanitize(exc.message)}, status=400)
         _set_brokered_url(name, new_base_url)
+        reset_provider(name)
+        try:
+            models = await get_provider(name).list_models()
+        except Exception as exc:  # noqa: BLE001 - any failure here is "couldn't reach"
+            return _unreachable_response(name, exc)
         kind = "brokered"
         stored_base_url = new_base_url
-
-    reset_provider(name)
-    try:
-        models = await get_provider(name).list_models()
-    except Exception as exc:  # noqa: BLE001 - any failure here is "couldn't reach"
-        return web.json_response(
-            {
-                "error": "provider_unreachable",
-                "message": _sanitize(str(exc)),
-                "provider": name,
-            },
-            status=503,
-        )
 
     return web.json_response({
         "provider": {
